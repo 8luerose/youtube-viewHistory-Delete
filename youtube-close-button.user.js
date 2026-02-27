@@ -1,9 +1,7 @@
 // ==UserScript==
 // @name         YouTube 1-Click Delete Button
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
-// @description  YouTube 시청 기록/쇼츠에서 영상을 1클릭으로 삭제하는 휴지통 버튼 추가 (2026 버전)
-// @author       You
+// @version      2.3.3
 // @match        *://www.youtube.com/*
 // @match        *://youtube.com/*
 // @grant        GM_addStyle
@@ -109,6 +107,55 @@
         ytm-shorts-lockup-view-model-v2 {
             position: relative !important;
         }
+
+        /* 쇼츠 섹션 "해당 줄 지우기" 버튼 (헤더용) */
+        .yt-shelf-delete-btn {
+            background: transparent;
+            border: none;
+            padding: 0 8px;
+            font-size: 14px;
+            font-weight: 500;
+            color: #0f0f0f;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-left: 8px;
+            transition: color 0.2s ease;
+            font-family: 'Roboto', 'Arial', sans-serif;
+            vertical-align: middle;
+            letter-spacing: normal;
+        }
+
+        .yt-shelf-delete-btn:hover {
+            color: #cc0000;
+        }
+
+        .yt-shelf-delete-btn svg {
+            width: 16px;
+            height: 16px;
+            fill: currentColor;
+        }
+
+        .yt-shelf-delete-btn.deleting {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        /* 쇼츠 섹션 삭제 애니메이션 */
+        .yt-shelf-removed {
+            animation: shelfFadeOut 0.4s ease forwards !important;
+        }
+
+        @keyframes shelfFadeOut {
+            to {
+                opacity: 0;
+                max-height: 0;
+                margin: 0;
+                padding: 0;
+                overflow: hidden;
+            }
+        }
     `);
 
     // ========================================
@@ -156,6 +203,34 @@
             e.stopPropagation();
             e.stopImmediatePropagation();
             await handleDelete(videoElement, btn);
+        });
+
+        return btn;
+    }
+
+
+
+    // 쇼츠 섹션 "해당 줄 지우기" 버튼 생성 (헤더용)
+    function createShelfDeleteButton(shelfElement) {
+        const btn = document.createElement('button');
+        btn.className = 'yt-shelf-delete-btn';
+        btn.type = 'button';
+        btn.title = '해당 줄 지우기';
+        btn.setAttribute('aria-label', '해당 줄 지우기');
+        
+        const icon = createTrashIcon();
+        const text = document.createElement('span');
+        text.textContent = '해당 줄 지우기';
+        
+        btn.appendChild(icon);
+        btn.appendChild(text);
+
+        btn.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+            
+            await handleShelfDelete(shelfElement, btn);
         });
 
         return btn;
@@ -446,9 +521,145 @@
     }
 
     // ========================================
+    // 쇼츠 섹션 "해당 줄 지우기" 버튼 주입 (헤더에 직접 추가)
+    // ========================================
+    function injectShelfDeleteButtons() {
+        const shelfSelectors = [
+            'ytd-reel-shelf-renderer',
+            'ytd-rich-shelf-renderer'
+        ];
+
+        let injectedCount = 0;
+
+        for (const selector of shelfSelectors) {
+            const shelves = document.querySelectorAll(selector);
+            
+            if (shelves.length > 0) {
+                log(`쇼츠 섹션: ${shelves.length}개 발견`);
+            }
+            
+            shelves.forEach(shelf => {
+                // 이미 버튼이 있으면 스킵
+                if (shelf.querySelector('.yt-shelf-delete-btn')) {
+                    return;
+                }
+                
+                // 헤더의 타이틀 영역 찾기 (#title 또는 h2)
+                const titleArea = shelf.querySelector('#title') || shelf.querySelector('h2');
+                if (titleArea) {
+                    const deleteBtn = createShelfDeleteButton(shelf);
+                    titleArea.appendChild(deleteBtn);
+                    injectedCount++;
+                    log('쇼츠 섹션 헤더에 버튼 추가');
+                }
+            });
+        }
+
+        if (injectedCount > 0) {
+            log(`쇼츠 섹션 ${injectedCount}개에 버튼 추가 완료`);
+        }
+
+        return injectedCount;
+    }
+
+
+
+
+    // 단일 영상 삭제 (버튼 없이 직접)
+    async function deleteSingleVideo(videoElement) {
+        try {
+            // 1. "추가 작업" 메뉴 버튼 찾기
+            const menuButton = findMenuButton(videoElement);
+            if (!menuButton) {
+                throw new Error('Menu button not found');
+            }
+            
+            // 2. 메뉴 버튼 클릭
+            menuButton.click();
+            
+            // 3. 메뉴 팝업 대기 후 삭제 항목 클릭
+            await waitForMenuAndClickDelete(videoElement);
+            
+            // 4. DOM에서 제거
+            videoElement.classList.add('yt-quick-delete-removed');
+            setTimeout(() => {
+                videoElement.remove();
+            }, 300);
+            
+        } catch (error) {
+            throw error;
+        }
+    }
+
+    // 쇼츠 섹션 실제 삭제 처리 (각 영상 순차 삭제)
+    async function handleShelfDelete(shelfElement, menuItem) {
+        log('쇼츠 섹션 실제 삭제 시작');
+
+        // 메뉴 항목 상태 변경
+        if (menuItem) {
+            menuItem.classList.add('deleting');
+        }
+
+        try {
+            // 섹션 내 모든 쇼츠 영상 찾기
+            const shortsSelectors = [
+                'ytm-shorts-lockup-view-model',
+                'ytm-shorts-lockup-view-model-v2',
+                'ytd-reel-item-renderer'
+            ];
+            
+            let shortsElements = [];
+            for (const selector of shortsSelectors) {
+                const elements = shelfElement.querySelectorAll(selector);
+                if (elements.length > 0) {
+                    shortsElements = Array.from(elements);
+                    break;
+                }
+            }
+            
+            if (shortsElements.length === 0) {
+                log('삭제할 쇼츠 영상이 없음');
+                return;
+            }
+            
+            log(`${shortsElements.length}개 쇼츠 영상 삭제 시작`);
+            
+            // 각 쇼츠 영상 순차적으로 삭제
+            for (let i = 0; i < shortsElements.length; i++) {
+                const shortElement = shortsElements[i];
+                log(`쇼츠 ${i + 1}/${shortsElements.length} 삭제 중...`);
+                
+                try {
+                    await deleteSingleVideo(shortElement);
+                    // 삭제 후 잠시 대기 (메뉴가 닫히는 시간)
+                    await sleep(150);
+                } catch (error) {
+                    log(`쇼츠 ${i + 1} 삭제 실패:`, error.message);
+                }
+            }
+            
+            // 모든 쇼츠 삭제 완료 후 섹션 DOM 제거
+            shelfElement.classList.add('yt-shelf-removed');
+            setTimeout(() => {
+                shelfElement.remove();
+                log('쇼츠 섹션 DOM에서 제거 완료');
+            }, 400);
+
+        } catch (error) {
+            log('쇼츠 섹션 삭제 실패:', error.message);
+            if (menuItem) {
+                menuItem.classList.remove('deleting');
+            }
+        }
+    }
+
+    // ========================================
     // MutationObserver 설정
     // ========================================
-    const debouncedInject = debounce(injectDeleteButtons, CONFIG.debounceDelay);
+    const debouncedInject = debounce(() => {
+        injectDeleteButtons();
+        injectShelfDeleteButtons();
+    }, CONFIG.debounceDelay);
 
     function setupObserver() {
         const observer = new MutationObserver((mutations) => {
@@ -461,8 +672,8 @@
                             const element = node;
                             // 2026년 구조 + 기존 구조 모두 확인
                             const isVideoElement = 
-                                element.matches?.('yt-lockup-view-model, ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, ytd-video-renderer, ytd-rich-item-renderer, ytd-reel-item-renderer') ||
-                                element.querySelector?.('yt-lockup-view-model, ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, ytd-video-renderer, ytd-rich-item-renderer, ytd-reel-item-renderer') ||
+                                element.matches?.('yt-lockup-view-model, ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, ytd-video-renderer, ytd-rich-item-renderer, ytd-reel-item-renderer, ytd-reel-shelf-renderer, ytd-rich-shelf-renderer') ||
+                                element.querySelector?.('yt-lockup-view-model, ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2, ytd-video-renderer, ytd-rich-item-renderer, ytd-reel-item-renderer, ytd-reel-shelf-renderer, ytd-rich-shelf-renderer') ||
                                 element.tagName?.startsWith('YTD-') ||
                                 element.tagName?.startsWith('YTM-') ||
                                 element.tagName?.startsWith('YT-');
@@ -501,7 +712,10 @@
         // yt-navigate-finish 이벤트 (YouTube 커스텀 이벤트)
         document.addEventListener('yt-navigate-finish', () => {
             log('yt-navigate-finish 이벤트');
-            setTimeout(injectDeleteButtons, 500);
+            setTimeout(() => {
+                injectDeleteButtons();
+                injectShelfDeleteButtons();
+            }, 500);
         });
 
         // URL 변경 감지 (백업)
@@ -510,7 +724,10 @@
             if (location.href !== lastUrl) {
                 lastUrl = location.href;
                 log('URL 변경 감지:', lastUrl);
-                setTimeout(injectDeleteButtons, 500);
+                setTimeout(() => {
+                    injectDeleteButtons();
+                    injectShelfDeleteButtons();
+                }, 500);
             }
         };
         
@@ -541,6 +758,10 @@
         // 초기 버튼 주입
         const count = injectDeleteButtons();
         log(`초기 주입: ${count}개`);
+
+        // 쇼츠 섹션 버튼 주입
+        const shelfCount = injectShelfDeleteButtons();
+        log(`쇼츠 섹션 주입: ${shelfCount}개`);
 
         // MutationObserver 설정
         setupObserver();
