@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         YouTube 1-Click Delete Button
 // @namespace    http://tampermonkey.net/
-// @version      2.3.3
-// @match        *://www.youtube.com/*
-// @match        *://youtube.com/*
+// @version      3.0.0
+// @match        *://www.youtube.com/feed/history*
+// @match        *://youtube.com/feed/history*
 // @grant        GM_addStyle
 // @run-at       document-idle
 // @noframes
@@ -27,12 +27,13 @@
             'Borrar del historial'
         ],
         // 클릭 후 대기 시간 (ms)
-        menuDelay: 100,
+        menuDelay: 30,
         // 디바운싱 시간 (ms)
-        debounceDelay: 200,
+        debounceDelay: 50,
         // 디버그 모드
         debug: true
     };
+
 
     // ========================================
     // 스타일 주입
@@ -357,12 +358,56 @@
                 if (deleteItem) {
                     log('삭제 메뉴 항목 발견, 클릭 실행');
                     deleteItem.click();
+                    
+                    // 삭제 완료까지 대기 (토스트 확인)
+                    await waitForDeleteComplete(menuPopup);
                     return;
                 }
             }
         }
 
         throw new Error('Delete menu item not found after maximum attempts');
+    }
+
+
+    // 삭제 완료 토스트가 뜰 때까지 대기
+    async function waitForDeleteComplete(menuPopup) {
+        const maxWait = 3000; // 최대 3초 대기
+        const checkInterval = 50;
+        let waited = 0;
+        let menuClosed = false;
+
+        while (waited < maxWait) {
+            await sleep(checkInterval);
+            waited += checkInterval;
+            
+            // 1. 메뉴가 닫혔는지 확인
+            if (!menuClosed && (
+                !document.body.contains(menuPopup) || 
+                menuPopup.style.display === 'none' ||
+                menuPopup.hidden ||
+                menuPopup.getAttribute('aria-hidden') === 'true')) {
+                menuClosed = true;
+                log(`메뉴 닫힘 (${waited}ms)`);
+            }
+            
+            // 2. 삭제 완료 토스트 확인
+            const toast = document.querySelector('ytd-notification-action-renderer, yt-toast-action-renderer, tp-yt-paper-toast');
+            if (toast) {
+                const text = toast.textContent || '';
+                if (text.includes('삭제') || text.includes('removed') || text.includes('Removed') || text.includes('deleted')) {
+                    log(`삭제 완료 토스트 확인 (${waited}ms)`);
+                    return;
+                }
+            }
+            
+            // 3. 메뉴가 닫힌 지 500ms가 지났으면 토스트 없이도 완료로 간주
+            if (menuClosed && waited > 500) {
+                log(`메뉴 닫힘 후 충분히 대기 (${waited}ms)`);
+                return;
+            }
+        }
+        log('대기 타임아웃 (계속 진행)');
     }
 
     // 삭제 메뉴 항목 찾기
@@ -632,7 +677,7 @@
                 try {
                     await deleteSingleVideo(shortElement);
                     // 삭제 후 잠시 대기 (메뉴가 닫히는 시간)
-                    await sleep(150);
+                    await sleep(40);
                 } catch (error) {
                     log(`쇼츠 ${i + 1} 삭제 실패:`, error.message);
                 }
@@ -643,7 +688,7 @@
             setTimeout(() => {
                 shelfElement.remove();
                 log('쇼츠 섹션 DOM에서 제거 완료');
-            }, 400);
+            }, 100);
 
         } catch (error) {
             log('쇼츠 섹션 삭제 실패:', error.message);
@@ -657,6 +702,8 @@
     // MutationObserver 설정
     // ========================================
     const debouncedInject = debounce(() => {
+        // 기록 페이지에서만 실행
+        if (!isHistoryPage()) return;
         injectDeleteButtons();
         injectShelfDeleteButtons();
     }, CONFIG.debounceDelay);
@@ -711,6 +758,8 @@
     function setupNavigationListener() {
         // yt-navigate-finish 이벤트 (YouTube 커스텀 이벤트)
         document.addEventListener('yt-navigate-finish', () => {
+            // 기록 페이지에서만 실행
+            if (!isHistoryPage()) return;
             log('yt-navigate-finish 이벤트');
             setTimeout(() => {
                 injectDeleteButtons();
@@ -723,6 +772,8 @@
         const checkUrlChange = () => {
             if (location.href !== lastUrl) {
                 lastUrl = location.href;
+                // 기록 페이지에서만 실행
+                if (!isHistoryPage()) return;
                 log('URL 변경 감지:', lastUrl);
                 setTimeout(() => {
                     injectDeleteButtons();
@@ -742,8 +793,19 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+    // 기록 페이지인지 확인
+    function isHistoryPage() {
+        return location.pathname.includes('/feed/history');
+    }
+
     async function init() {
-        log('초기화 시작 (2026 버전)');
+        // 기록 페이지가 아니면 실행하지 않음
+        if (!isHistoryPage()) {
+            log('기록 페이지가 아니므로 스킵');
+            return;
+        }
+
+        log('초기화 시작');
 
         // DOM 로딩 대기
         if (document.readyState === 'loading') {
@@ -753,7 +815,7 @@
         }
 
         // YouTube 동적 로딩 대기
-        await sleep(1500);
+        await sleep(800);
 
         // 초기 버튼 주입
         const count = injectDeleteButtons();
